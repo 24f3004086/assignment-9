@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uuid
 import time
 import base64
+from fastapi.responses import JSONResponse
 
 app = FastAPI(title="Orders API")
 
@@ -60,21 +61,24 @@ def check_rate_limit(client_id: str):
     if client_id not in rate_limit_store:
         rate_limit_store[client_id] = []
 
-    # Remove timestamps older than WINDOW seconds
+    # Keep only timestamps from the last 10 seconds
     rate_limit_store[client_id] = [
         t for t in rate_limit_store[client_id]
         if now - t < WINDOW
     ]
 
+    # Rate limit exceeded
     if len(rate_limit_store[client_id]) >= RATE_LIMIT:
-        raise HTTPException(
+        return JSONResponse(
             status_code=429,
-            detail="Rate limit exceeded",
+            content={"detail": "Rate limit exceeded"},
             headers={"Retry-After": "10"},
         )
 
+    # Record this request
     rate_limit_store[client_id].append(now)
 
+    return None
 
 # =====================================================
 # POST /orders
@@ -113,7 +117,9 @@ def get_orders(
     x_client_id: str = Header(..., alias="X-Client-Id"),
 ):
 
-    check_rate_limit(x_client_id)
+    response = check_rate_limit(x_client_id)
+    if response:
+        return response
 
     if cursor:
         start = decode_cursor(cursor)
