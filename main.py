@@ -1,15 +1,14 @@
-from fastapi import FastAPI, Header
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 import uuid
 import time
 import base64
 
 app = FastAPI(title="Orders API")
 
-# --------------------------------------------------
+# ----------------------------------------------------
 # CORS
-# --------------------------------------------------
+# ----------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,58 +17,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------------------------------------------------
-# Constants
-# --------------------------------------------------
 TOTAL_ORDERS = 42
 RATE_LIMIT = 18
-WINDOW = 10  # seconds
+WINDOW = 10
 
-# --------------------------------------------------
-# Fixed catalog (IDs 1..42)
-# --------------------------------------------------
-orders = [
-    {
-        "id": i,
-        "item": f"Item {i}"
-    }
+# Fixed catalog
+catalog = [
+    {"id": i, "item": f"Item {i}"}
     for i in range(1, TOTAL_ORDERS + 1)
 ]
 
-# --------------------------------------------------
-# Stores
-# --------------------------------------------------
+# Memory stores
 idempotency_store = {}
 rate_limit_store = {}
 
-# --------------------------------------------------
+
+# ----------------------------------------------------
 # Cursor helpers
-# --------------------------------------------------
+# ----------------------------------------------------
 def encode_cursor(index: int) -> str:
     return base64.b64encode(str(index).encode()).decode()
 
 
 def decode_cursor(cursor: str) -> int:
-    return int(base64.b64decode(cursor.encode()).decode())
+    try:
+        return int(base64.b64decode(cursor).decode())
+    except Exception:
+        return 0
 
 
-# --------------------------------------------------
-# Rate limiting
-# --------------------------------------------------
-from fastapi import HTTPException
-
+# ----------------------------------------------------
+# Rate limiter
+# ----------------------------------------------------
 def check_rate_limit(client_id: str):
     now = time.time()
 
     bucket = rate_limit_store.setdefault(client_id, [])
 
-    # Remove timestamps older than WINDOW
+    # Remove timestamps older than WINDOW seconds
     bucket[:] = [t for t in bucket if now - t < WINDOW]
 
     if len(bucket) >= RATE_LIMIT:
-        retry_after = int(WINDOW - (now - bucket[0]))
-        if retry_after < 1:
-            retry_after = 1
+        retry_after = max(1, int(WINDOW - (now - bucket[0])))
 
         raise HTTPException(
             status_code=429,
@@ -81,25 +70,39 @@ def check_rate_limit(client_id: str):
 
     bucket.append(now)
 
-# --------------------------------------------------
+
+# ----------------------------------------------------
+# Root
+# ----------------------------------------------------
+@app.get("/")
+def root():
+    return {"message": "Orders API is running"}
+
+
+# ----------------------------------------------------
 # POST /orders
-# --------------------------------------------------
+# ----------------------------------------------------
 @app.post("/orders", status_code=201)
 def create_order(
-    idempotency_key: str = Header(..., alias="Idempotency-Key"),
-    x_client_id: str = Header(..., alias="X-Client-Id"),
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key"
+    ),
+    x_client_id: str = Header(
+        default="anonymous",
+        alias="X-Client-Id"
+    ),
 ):
+    check_rate_limit(x_client_id)
 
-    response = check_rate_limit(x_client_id)
-    if response:
-        return response
+    if idempotency_key is None:
+        idempotency_key = str(uuid.uuid4())
 
     if idempotency_key in idempotency_store:
         return idempotency_store[idempotency_key]
 
     order = {
-        "id": str(uuid.uuid4()),
-        "status": "created"
+        "id": str(uuid.uuid4())
     }
 
     idempotency_store[idempotency_key] = order
@@ -107,19 +110,19 @@ def create_order(
     return order
 
 
-# --------------------------------------------------
+# ----------------------------------------------------
 # GET /orders
-# --------------------------------------------------
+# ----------------------------------------------------
 @app.get("/orders")
 def get_orders(
     limit: int = 10,
     cursor: str | None = None,
-    x_client_id: str = Header(..., alias="X-Client-Id"),
+    x_client_id: str = Header(
+        default="anonymous",
+        alias="X-Client-Id"
+    ),
 ):
-
-    response = check_rate_limit(x_client_id)
-    if response:
-        return response
+    check_rate_limit(x_client_id)
 
     if limit < 1:
         limit = 1
@@ -127,12 +130,9 @@ def get_orders(
     start = 0
 
     if cursor:
-        try:
-            start = decode_cursor(cursor)
-        except Exception:
-            start = 0
+        start = decode_cursor(cursor)
 
-    items = orders[start:start + limit]
+    items = catalog[start:start + limit]
 
     next_index = start + len(items)
 
@@ -144,14 +144,4 @@ def get_orders(
     return {
         "items": items,
         "next_cursor": next_cursor
-    }
-
-
-# --------------------------------------------------
-# Root
-# --------------------------------------------------
-@app.get("/")
-def root():
-    return {
-        "message": "Orders API is running"
     }
