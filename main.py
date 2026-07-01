@@ -56,33 +56,30 @@ def decode_cursor(cursor: str) -> int:
 # --------------------------------------------------
 # Rate limiting
 # --------------------------------------------------
+from fastapi import HTTPException
+
 def check_rate_limit(client_id: str):
     now = time.time()
 
-    if client_id not in rate_limit_store:
-        rate_limit_store[client_id] = []
+    bucket = rate_limit_store.setdefault(client_id, [])
 
-    # Remove timestamps older than 10 seconds
-    rate_limit_store[client_id] = [
-        t for t in rate_limit_store[client_id]
-        if now - t < WINDOW
-    ]
+    # Remove timestamps older than WINDOW
+    bucket[:] = [t for t in bucket if now - t < WINDOW]
 
-    if len(rate_limit_store[client_id]) >= RATE_LIMIT:
-        oldest = min(rate_limit_store[client_id])
-        retry_after = max(1, int(WINDOW - (now - oldest)))
+    if len(bucket) >= RATE_LIMIT:
+        retry_after = int(WINDOW - (now - bucket[0]))
+        if retry_after < 1:
+            retry_after = 1
 
-        return JSONResponse(
+        raise HTTPException(
             status_code=429,
-            content={"detail": "Rate limit exceeded"},
+            detail="Rate limit exceeded",
             headers={
                 "Retry-After": str(retry_after)
             },
         )
 
-    rate_limit_store[client_id].append(now)
-    return None
-
+    bucket.append(now)
 
 # --------------------------------------------------
 # POST /orders
